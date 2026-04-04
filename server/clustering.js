@@ -324,6 +324,141 @@ async function analyzeBrowsingHistory() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// buildOpenTabsPrompt(tabs)
+//
+// Builds a simpler prompt specifically for clustering currently open tabs.
+// Unlike buildPrompt() which works with history data and visit counts, this
+// one just gets raw tab titles and URLs — because open tabs don't have
+// visit-count metadata.
+//
+// The key instruction to the AI: every single tab must be assigned to a mission.
+// No orphans allowed. This is the core contract of the new architecture.
+// ─────────────────────────────────────────────────────────────────────────────
+function buildOpenTabsPrompt(tabs) {
+  // Format each tab as a numbered list item
+  const tabLines = tabs.map((tab, i) => {
+    const n = i + 1;
+    const title = tab.title || '(no title)';
+    const url   = tab.url   || '';
+    return `${n}. [${title}] ${url}`;
+  }).join('\n');
+
+  return `You are an AI assistant that organizes currently open browser tabs into meaningful "missions" — clusters of intent and purpose.
+
+Here are the user's currently open browser tabs:
+
+${tabLines}
+
+Group ALL of these tabs into missions. Every single tab must appear in exactly one mission.
+
+Rules:
+- Group by INTENT, not by domain. Researching a topic might span GitHub, docs, and blog posts — they all belong together.
+- Be SPECIFIC and descriptive in mission names. "Debugging Next.js Hydration Error" is better than "Web Dev".
+- Every tab must appear in exactly one mission — no tab should be left out. If a tab is genuinely miscellaneous, create a "Miscellaneous" mission for it.
+- Keep the total number of missions reasonable (3–10). Don't create a separate mission for every single tab.
+- Write a concise 1-sentence summary for each mission describing what the user is trying to accomplish.
+
+Respond ONLY with valid JSON in this exact format (no markdown, no explanation):
+{
+  "missions": [
+    {
+      "name": "Short, specific mission name",
+      "summary": "One sentence describing what this mission is about",
+      "tab_indices": [1, 2, 5]
+    }
+  ]
+}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// parseOpenTabsResponse(responseText, tabs)
+//
+// Parses DeepSeek's response for open-tab clustering.
+// Similar to parseResponse() but simpler — no last_visit, no status, no DB IDs.
+// Returns an array of mission objects shaped for the dashboard's "Right now" view.
+//
+// Each returned mission looks like:
+//   { name, summary, tabs: [{ url, title, tabId }] }
+// ─────────────────────────────────────────────────────────────────────────────
+function parseOpenTabsResponse(responseText, tabs) {
+  // Strip markdown code fences if DeepSeek wraps the JSON
+  let cleaned = responseText.trim();
+  cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (err) {
+    throw new Error(`[clustering] Failed to parse open-tabs response as JSON: ${err.message}\nRaw: ${responseText.slice(0, 500)}`);
+  }
+
+  if (!parsed || !Array.isArray(parsed.missions)) {
+    throw new Error(`[clustering] Open-tabs response missing "missions" array. Got: ${JSON.stringify(parsed).slice(0, 200)}`);
+  }
+
+  return parsed.missions.map(mission => {
+    // tab_indices are 1-based (matching our numbered list in the prompt)
+    const tabIndices = Array.isArray(mission.tab_indices) ? mission.tab_indices : [];
+    const resolvedTabs = tabIndices
+      .map(idx => tabs[idx - 1])   // convert 1-based to 0-based array index
+      .filter(Boolean);             // drop any out-of-range indices
+
+    return {
+      name:    mission.name    || 'Unnamed Mission',
+      summary: mission.summary || '',
+      // Preserve the original tab object (which may include tabId from the extension)
+      tabs:    resolvedTabs,
+    };
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// clusterOpenTabs(tabs)
+//
+// Takes an array of currently open tab objects { url, title, tabId } and
+// asks DeepSeek to group them into missions. This is ephemeral — results
+// are NOT stored in the database. They're recalculated fresh every page load.
+//
+// Returns: [ { name, summary, tabs: [{ url, title, tabId }] }, ... ]
+// ─────────────────────────────────────────────────────────────────────────────
+async function clusterOpenTabs(tabs) {
+  if (!tabs || tabs.length === 0) {
+    console.log('[clustering] clusterOpenTabs: no tabs provided, returning empty array');
+    return [];
+  }
+
+  console.log(`[clustering] Clustering ${tabs.length} open tabs...`);
+
+  const client = getClient();
+  const prompt = buildOpenTabsPrompt(tabs);
+
+  let responseText;
+  try {
+    const completion = await client.chat.completions.create({
+      model:       config.deepseekModel,
+      temperature: 0.3,   // Low temperature = consistent, predictable output
+      max_tokens:  3000,  // Enough for up to ~15 missions
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    responseText = completion.choices?.[0]?.message?.content;
+
+    if (!responseText) {
+      throw new Error('DeepSeek returned an empty response for open-tabs clustering');
+    }
+
+    console.log(`[clustering] Open-tabs DeepSeek response: ${responseText.length} chars`);
+  } catch (err) {
+    console.error(`[clustering] Open-tabs DeepSeek API call failed: ${err.message}`);
+    throw err;
+  }
+
+  const missions = parseOpenTabsResponse(responseText, tabs);
+  console.log(`[clustering] clusterOpenTabs: got ${missions.length} missions`);
+  return missions;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Exports
 // ─────────────────────────────────────────────────────────────────────────────
-module.exports = { analyzeBrowsingHistory };
+module.exports = { analyzeBrowsingHistory, clusterOpenTabs };

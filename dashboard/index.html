@@ -73,31 +73,33 @@
   </div>
 
   <!-- ================================================================
-       ACTIVE SECTION — missions with status "active" or "cooling"
-       Hidden by default; app.js shows it when there are active missions
+       OPEN TABS SECTION — currently open tabs grouped into missions
+       This is the PRIMARY view. Every open tab belongs to a mission.
+       Hidden by default; app.js shows it after clustering open tabs.
        ================================================================ -->
-  <div class="active-section" id="activeSection" style="display:none">
+  <div class="active-section" id="openTabsSection" style="display:none">
     <div class="section-header">
-      <h2>Active today</h2>
+      <h2>Right now</h2>
       <div class="section-line"></div>
-      <div class="section-count" id="activeSectionCount"></div>
+      <div class="section-count" id="openTabsSectionCount"></div>
     </div>
-    <!-- Mission cards injected here by renderMissionCard() in app.js -->
-    <div class="missions" id="activeMissions"></div>
+    <!-- Mission cards injected here by renderOpenTabsMissionCard() in app.js -->
+    <div class="missions" id="openTabsMissions"></div>
   </div>
 
   <!-- ================================================================
-       ABANDONED SECTION — missions with status "abandoned"
-       Hidden by default; app.js shows it when there are abandoned missions
+       HISTORY SECTION — abandoned work from browsing history
+       Secondary view: missions from history with zero currently open tabs.
+       Hidden by default; app.js shows it when history missions exist.
        ================================================================ -->
-  <div class="abandoned-section" id="abandonedSection" style="display:none">
+  <div class="abandoned-section" id="historySection" style="display:none">
     <div class="section-header">
-      <h2>Gone cold</h2>
+      <h2>Pick back up</h2>
       <div class="section-line"></div>
-      <div class="section-count" id="abandonedSectionCount"></div>
+      <div class="section-count" id="historySectionCount"></div>
     </div>
-    <!-- Mission cards injected here by renderMissionCard() in app.js -->
-    <div class="missions" id="abandonedMissions"></div>
+    <!-- Smaller history mission cards injected here by renderHistoryMissionCard() -->
+    <div class="missions" id="historyMissions"></div>
   </div>
 
   <!-- ================================================================

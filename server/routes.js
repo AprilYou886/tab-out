@@ -29,8 +29,10 @@ const {
   db,
 } = require('./db');
 
-// Pull in the AI clustering function that reads Chrome history and creates missions
-const { analyzeBrowsingHistory } = require('./clustering');
+// Pull in the AI clustering functions
+// analyzeBrowsingHistory() — reads Chrome history and creates missions for the DB
+// clusterOpenTabs()        — clusters currently open tabs ephemerally (no DB)
+const { analyzeBrowsingHistory, clusterOpenTabs } = require('./clustering');
 
 // An Express Router is like a mini-app: it holds a group of related routes.
 // We export it and mount it on the main Express app in index.js.
@@ -272,6 +274,134 @@ router.get('/stats', (req, res) => {
   } catch (err) {
     console.error('[routes] GET /stats failed:', err.message);
     res.status(500).json({ error: 'Failed to fetch stats' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/cluster-tabs
+//
+// NEW endpoint for the "Right now" section.
+//
+// Receives an array of currently open browser tabs from the dashboard,
+// filters out chrome:// and extension pages, then asks DeepSeek to cluster
+// them into missions. Results are NOT stored in the database — this is purely
+// ephemeral, recalculated fresh on every page load.
+//
+// Request body:  { tabs: [{ url, title, tabId }] }
+// Response body: { missions: [{ name, summary, tabs: [{ url, title, tabId }] }] }
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/cluster-tabs', async (req, res) => {
+  const { tabs } = req.body;
+
+  // Validate input — must provide a non-empty array of tabs
+  if (!Array.isArray(tabs) || tabs.length === 0) {
+    return res.status(400).json({ error: 'Request body must include a non-empty tabs array.' });
+  }
+
+  // Filter out browser-internal pages that the AI shouldn't see:
+  //   chrome://newtab, chrome-extension://, about:blank, etc.
+  // These aren't real browsing content and would confuse the AI.
+  const filteredTabs = tabs.filter(tab => {
+    const url = tab.url || '';
+    return (
+      !url.startsWith('chrome://') &&
+      !url.startsWith('chrome-extension://') &&
+      !url.startsWith('about:') &&
+      !url.startsWith('edge://') &&
+      !url.startsWith('brave://') &&
+      url.length > 0
+    );
+  });
+
+  if (filteredTabs.length === 0) {
+    // All tabs were browser-internal — return empty missions array
+    return res.json({ missions: [] });
+  }
+
+  try {
+    // Call DeepSeek to cluster the filtered tabs into missions.
+    // This function lives in clustering.js and returns the missions array directly.
+    const missions = await clusterOpenTabs(filteredTabs);
+    res.json({ missions });
+  } catch (err) {
+    console.error('[routes] POST /cluster-tabs failed:', err.message);
+    res.status(500).json({ error: 'Failed to cluster tabs: ' + err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/history-missions
+//
+// NEW endpoint for the "Pick back up" section.
+//
+// Returns missions from the SQLite database (history-based ones created by
+// analyzeBrowsingHistory()), but ONLY those where NONE of the mission's URLs
+// match any currently open tab URL. This prevents showing a mission in both
+// "Right now" AND "Pick back up" at the same time.
+//
+// Query param: ?openUrls=https://example.com,https://other.com (comma-separated)
+// The dashboard passes the URLs of all currently open tabs so we can filter.
+//
+// Response: same shape as GET /api/missions (array of mission objects with urls)
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/history-missions', (req, res) => {
+  try {
+    // Parse the comma-separated openUrls query param into a Set for fast lookups.
+    // A Set is like a list but with super-fast "does this exist?" checks.
+    const rawOpenUrls = req.query.openUrls || '';
+    const openUrlSet = new Set(
+      rawOpenUrls
+        .split(',')
+        .map(u => u.trim())
+        .filter(Boolean)
+    );
+
+    // Fetch all non-dismissed missions from the database
+    const allMissions = getMissions.all();
+
+    // For each mission, attach its URLs — then filter out any mission whose
+    // URLs overlap with the currently open tabs.
+    const historyMissions = allMissions
+      .map(mission => ({
+        ...mission,
+        urls: getMissionUrls.all({ id: mission.id }),
+      }))
+      .filter(mission => {
+        // Keep this mission ONLY if none of its URLs are currently open.
+        // "Currently open" is checked by exact URL match and by domain match,
+        // since open tabs and history URLs might differ slightly in path/params.
+        const hasOpenTab = mission.urls.some(urlRow => {
+          const missionUrl = urlRow.url || '';
+
+          // First: exact URL match
+          if (openUrlSet.has(missionUrl)) return true;
+
+          // Second: domain match — if any open tab is from the same hostname,
+          // consider this mission as "currently active" and exclude it from history.
+          try {
+            const missionHostname = new URL(missionUrl).hostname;
+            for (const openUrl of openUrlSet) {
+              try {
+                const openHostname = new URL(openUrl).hostname;
+                if (openHostname === missionHostname) return true;
+              } catch { /* skip malformed URLs */ }
+            }
+          } catch { /* skip malformed mission URLs */ }
+
+          return false;
+        });
+
+        // hasOpenTab = true means the mission IS open right now → exclude it
+        return !hasOpenTab;
+      });
+
+    // Return at most 5 history missions (the "Pick back up" section is secondary)
+    const limited = historyMissions.slice(0, 5);
+
+    res.json(limited);
+  } catch (err) {
+    console.error('[routes] GET /history-missions failed:', err.message);
+    res.status(500).json({ error: 'Failed to fetch history missions' });
   }
 });
 

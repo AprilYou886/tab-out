@@ -249,34 +249,135 @@ const ICONS = {
 
 
 /* ----------------------------------------------------------------
-   MISSION CARD RENDERER
+   MISSION CARD RENDERERS
 
-   This is the most important function in the file. It takes a
-   mission object (from the API) and returns an HTML string for
-   one mission card.
+   Two distinct renderers for the two sections:
+
+   1. renderOpenTabsMissionCard() — for "Right now" section.
+      Shows currently open tabs as chips. Has "Close all" button.
+      These missions come from /api/cluster-tabs (ephemeral, live).
+
+   2. renderHistoryMissionCard() — for "Pick back up" section.
+      Lighter/smaller treatment. Has "Reopen" link.
+      These missions come from /api/history-missions (from the DB).
    ---------------------------------------------------------------- */
 
 /**
- * renderMissionCard(mission, openTabCount)
+ * renderOpenTabsMissionCard(mission, missionIndex)
  *
- * Builds the full HTML for a single mission card.
+ * Builds the HTML for a single "Right now" mission card.
+ * The mission object comes from /api/cluster-tabs and has this shape:
+ *   { name, summary, tabs: [{ url, title, tabId }] }
  *
- * @param {Object} mission      - Mission object from /api/missions
- * @param {number} openTabCount - How many browser tabs are open for this mission
+ * @param {Object} mission      - Mission object from cluster-tabs API
+ * @param {number} missionIndex - 0-based index, used as a fallback ID
  * @returns {string}            - HTML string ready for innerHTML
  */
+function renderOpenTabsMissionCard(mission, missionIndex) {
+  const tabs = mission.tabs || [];
+  const tabCount = tabs.length;
+
+  // Tab count badge — always shown since every card has open tabs by definition
+  const tabBadge = `<span class="open-tabs-badge">
+    ${ICONS.tabs}
+    ${tabCount} tab${tabCount !== 1 ? 's' : ''} open
+  </span>`;
+
+  // Page chips — one per actual open tab (up to 5 shown, rest summarized)
+  const visibleTabs = tabs.slice(0, 5);
+  const extraCount  = tabs.length - visibleTabs.length;
+  const pageChips = visibleTabs.map(tab => {
+    const label   = tab.title || tab.url || '';
+    const display = label.length > 45 ? label.slice(0, 45) + '…' : label;
+    return `<span class="page-chip">${display}</span>`;
+  }).join('') + (extraCount > 0 ? `<span class="page-chip">+${extraCount} more</span>` : '');
+
+  // The "Close all" button — data-open-tab-mission-idx lets the click handler
+  // find this mission in the in-memory openTabMissions array (since these
+  // missions don't have DB IDs).
+  const actionsHtml = tabCount > 0 ? `
+    <button class="action-btn close-tabs" data-action="close-open-tabs" data-open-mission-idx="${missionIndex}">
+      ${ICONS.close}
+      Close all ${tabCount} tab${tabCount !== 1 ? 's' : ''}
+    </button>` : '';
+
+  return `
+    <div class="mission-card" data-open-mission-idx="${missionIndex}">
+      <div class="status-bar active"></div>
+      <div class="mission-content">
+        <div class="mission-top">
+          <span class="mission-name">${mission.name || 'Unnamed Mission'}</span>
+          <span class="mission-tag active">Open</span>
+          ${tabBadge}
+        </div>
+        <div class="mission-summary">${mission.summary || ''}</div>
+        <div class="mission-pages">${pageChips}</div>
+        ${actionsHtml ? `<div class="actions">${actionsHtml}</div>` : ''}
+      </div>
+      <div class="mission-meta">
+        <div class="mission-page-count">${tabCount}</div>
+        <div class="mission-page-label">tabs</div>
+      </div>
+    </div>`;
+}
+
+/**
+ * renderHistoryMissionCard(mission)
+ *
+ * Builds the HTML for a single "Pick back up" history card.
+ * Lighter visual treatment — smaller, no status bar color, just info + reopen.
+ * The mission object comes from /api/history-missions and has the DB shape:
+ *   { id, name, summary, status, last_activity, urls: [{ url, title }] }
+ *
+ * @param {Object} mission - Mission object from history-missions API
+ * @returns {string}       - HTML string ready for innerHTML
+ */
+function renderHistoryMissionCard(mission) {
+  const pageCount = (mission.urls || []).length;
+
+  // Status-based age tag (e.g. "2 days cold", "1 week cold")
+  const ageLabel = timeAgo(mission.last_activity)
+    .replace(' ago', '')
+    .replace('yesterday', '1 day')
+    .replace(' hrs', 'h')
+    .replace(' hr', 'h')
+    .replace(' min', 'm');
+
+  return `
+    <div class="mission-card history-card" data-mission-id="${mission.id}">
+      <div class="status-bar abandoned"></div>
+      <div class="mission-content">
+        <div class="mission-top">
+          <span class="mission-name">${mission.name || 'Unnamed Mission'}</span>
+          <span class="mission-tag abandoned">${ageLabel} ago</span>
+        </div>
+        <div class="mission-summary">${mission.summary || ''}</div>
+        <div class="actions">
+          <button class="action-btn primary" data-action="focus" data-mission-id="${mission.id}">
+            ${ICONS.focus}
+            Reopen
+          </button>
+          <button class="action-btn danger" data-action="dismiss" data-mission-id="${mission.id}">
+            Let it go
+          </button>
+        </div>
+      </div>
+      <div class="mission-meta">
+        <div class="mission-page-count">${pageCount}</div>
+        <div class="mission-page-label">pages</div>
+      </div>
+    </div>`;
+}
+
+// Keep the old renderMissionCard() for any legacy use (e.g. handleCloseAllStale)
+// but it's no longer called by renderDashboard().
 function renderMissionCard(mission, openTabCount) {
   const status = mission.status || 'active';
-
-  // The colored left bar's CSS class matches the status word
-  const statusBarClass = status; // 'active', 'cooling', or 'abandoned'
-
-  // The status tag shows either "Active", the cooling age, or the abandoned age
+  const statusBarClass = status;
   let tagLabel = '';
   if (status === 'active') {
     tagLabel = 'Active';
   } else {
-    // For cooling/abandoned, show a human-friendly age like "1 day" or "2 days"
     tagLabel = timeAgo(mission.last_activity)
       .replace(' ago', '')
       .replace('yesterday', '1 day')
@@ -284,79 +385,17 @@ function renderMissionCard(mission, openTabCount) {
       .replace(' hr', 'h')
       .replace(' min', 'm');
   }
-
-  // Tab badge — only shown if there are open tabs for this mission
   const tabBadge = openTabCount > 0
-    ? `<span class="open-tabs-badge" data-mission-id="${mission.id}">
-         ${ICONS.tabs}
-         ${openTabCount} tab${openTabCount !== 1 ? 's' : ''} open
-       </span>`
+    ? `<span class="open-tabs-badge" data-mission-id="${mission.id}">${ICONS.tabs} ${openTabCount} tab${openTabCount !== 1 ? 's' : ''} open</span>`
     : '';
-
-  // Page chips — show up to 4 URLs, truncated to 40 characters each
   const pages = (mission.urls || []).slice(0, 4);
   const pageChips = pages.map(page => {
-    // Use the title if available, otherwise the URL
     const label = page.title || page.url || page;
     const display = label.length > 40 ? label.slice(0, 40) + '…' : label;
     return `<span class="page-chip">${display}</span>`;
   }).join('');
-
-  // Meta section (top-right of card): time + page count
   const pageCount = (mission.urls || []).length;
-  const metaHtml = `
-    <div class="mission-meta">
-      <div class="mission-time">${timeAgo(mission.last_activity)}</div>
-      <div class="mission-page-count">${pageCount}</div>
-      <div class="mission-page-label">pages</div>
-    </div>`;
-
-  // Action buttons vary by status:
-  // - active: just "Close N tabs" (if tabs open)
-  // - cooling: "Focus on this" + "Close N tabs" (if tabs open)
-  // - abandoned: "Pick back up" + "Close & archive" (if tabs open) + "Let it go"
-  let actionsHtml = '';
-
-  if (status === 'active') {
-    if (openTabCount > 0) {
-      actionsHtml = `
-        <button class="action-btn close-tabs" data-action="close-tabs" data-mission-id="${mission.id}">
-          ${ICONS.close}
-          Close ${openTabCount} tab${openTabCount !== 1 ? 's' : ''}
-        </button>`;
-    }
-  } else if (status === 'cooling') {
-    actionsHtml = `
-      <button class="action-btn primary" data-action="focus" data-mission-id="${mission.id}">
-        ${ICONS.focus}
-        Focus on this
-      </button>`;
-    if (openTabCount > 0) {
-      actionsHtml += `
-        <button class="action-btn close-tabs" data-action="close-tabs" data-mission-id="${mission.id}">
-          ${ICONS.close}
-          Close ${openTabCount} tab${openTabCount !== 1 ? 's' : ''}
-        </button>`;
-    }
-  } else if (status === 'abandoned') {
-    actionsHtml = `
-      <button class="action-btn primary" data-action="focus" data-mission-id="${mission.id}">
-        ${ICONS.focus}
-        Pick back up
-      </button>`;
-    if (openTabCount > 0) {
-      actionsHtml += `
-        <button class="action-btn close-tabs" data-action="archive" data-mission-id="${mission.id}">
-          ${ICONS.archive}
-          Close &amp; archive
-        </button>`;
-    }
-    actionsHtml += `
-      <button class="action-btn danger" data-action="dismiss" data-mission-id="${mission.id}">
-        Let it go
-      </button>`;
-  }
-
+  const metaHtml = `<div class="mission-meta"><div class="mission-time">${timeAgo(mission.last_activity)}</div><div class="mission-page-count">${pageCount}</div><div class="mission-page-label">pages</div></div>`;
   return `
     <div class="mission-card" data-mission-id="${mission.id}">
       <div class="status-bar ${statusBarClass}"></div>
@@ -368,7 +407,6 @@ function renderMissionCard(mission, openTabCount) {
         </div>
         <div class="mission-summary">${mission.summary || ''}</div>
         <div class="mission-pages">${pageChips}</div>
-        ${actionsHtml ? `<div class="actions">${actionsHtml}</div>` : ''}
       </div>
       ${metaHtml}
     </div>`;
@@ -418,67 +456,148 @@ function renderScatterBar(missionCount) {
 
 
 /* ----------------------------------------------------------------
+   IN-MEMORY STORE FOR OPEN-TAB MISSIONS
+
+   Because /api/cluster-tabs missions are ephemeral (not in the DB),
+   we keep them in memory so the click handler can look them up when
+   a "Close all" button is pressed.
+
+   openTabMissions is repopulated every time renderDashboard() runs.
+   ---------------------------------------------------------------- */
+let openTabMissions = [];
+
+
+/* ----------------------------------------------------------------
    MAIN DASHBOARD RENDERER
 
-   This is called on page load (and again after refresh).
-   It fetches all data and paints the full UI.
+   New architecture:
+   1. Fetch open tabs from extension
+   2. POST those tabs to /api/cluster-tabs → "Right now" section
+   3. Fetch /api/history-missions (excluding open tab URLs) → "Pick back up"
+   4. Render both sections
+   5. Keep cleanup banner, scatter bar, footer stats
    ---------------------------------------------------------------- */
 
 /**
  * renderDashboard()
  *
  * Orchestrates everything:
- * 1. Fetch missions from the server
- * 2. Fetch open tabs from the extension
- * 3. Split missions into active vs abandoned
- * 4. Calculate stale tabs (open but belonging to non-active missions)
- * 5. Paint all sections
+ * 1. Paint greeting + date in the header
+ * 2. Fetch open tabs from the Chrome extension
+ * 3. Cluster those open tabs via /api/cluster-tabs → Section 1 "Right now"
+ * 4. Fetch history missions that don't overlap with open tabs → Section 2 "Pick back up"
+ * 5. Compute scatter level (based on number of open-tab missions)
+ * 6. Show/hide cleanup banner and nudge banner
+ * 7. Update footer stats
  */
 async function renderDashboard() {
   // --- Header: greeting + date ---
   const greetingEl = document.getElementById('greeting');
-  const dateEl = document.getElementById('dateDisplay');
+  const dateEl     = document.getElementById('dateDisplay');
   if (greetingEl) greetingEl.textContent = getGreeting();
-  if (dateEl) dateEl.textContent = getDateDisplay();
+  if (dateEl)     dateEl.textContent     = getDateDisplay();
 
-  // --- Fetch missions from Express server ---
-  let missions = [];
-  try {
-    const res = await fetch('/api/missions');
-    if (res.ok) {
-      missions = await res.json();
-    }
-  } catch (err) {
-    console.warn('[TMC] Could not fetch missions:', err);
-  }
-
-  // --- Fetch open tabs from extension ---
+  // ── Step 1: Fetch open tabs from the Chrome extension ────────────────────
+  // fetchOpenTabs() populates the global `openTabs` array and sets
+  // `extensionAvailable`. If not in the extension, openTabs stays [].
   await fetchOpenTabs();
 
-  // --- Split missions into active (active + cooling) and abandoned ---
-  const activeMissions    = missions.filter(m => m.status === 'active' || m.status === 'cooling');
-  const abandonedMissions = missions.filter(m => m.status === 'abandoned');
+  // ── Step 2: Cluster open tabs into missions ("Right now") ────────────────
+  // We send all real tabs to the server, which calls DeepSeek to group them.
+  // This is ephemeral — not stored, recalculated every load.
+  openTabMissions = []; // reset in-memory store
 
-  // --- Calculate stale tabs ---
-  // A "stale tab" is a browser tab that belongs to a mission that is NOT currently active.
-  // These are tabs Zara left open but isn't actively working on — clutter she can clear.
-  const activeMissionUrls = new Set(
-    activeMissions.flatMap(m => (m.urls || []))
-  );
+  const openTabsSection     = document.getElementById('openTabsSection');
+  const openTabsMissionsEl  = document.getElementById('openTabsMissions');
+  const openTabsSectionCount = document.getElementById('openTabsSectionCount');
 
-  const staleTabs = openTabs.filter(tab => {
-    // Does this tab match any active mission? If not, it's stale.
-    const matchesActive = activeMissions.some(m => {
-      return getOpenTabsForMission((m.urls || []))
-        .some(t => t.url === tab.url);
-    });
-    return !matchesActive;
+  // Filter out chrome:// / extension pages before sending to server
+  const realTabs = openTabs.filter(t => {
+    const url = t.url || '';
+    return (
+      !url.startsWith('chrome://') &&
+      !url.startsWith('chrome-extension://') &&
+      !url.startsWith('about:') &&
+      !url.startsWith('edge://') &&
+      !url.startsWith('brave://')
+    );
   });
 
-  // --- Scatter bar ---
-  renderScatterBar(activeMissions.length);
+  if (extensionAvailable && realTabs.length > 0) {
+    try {
+      const clusterRes = await fetch('/api/cluster-tabs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tabs: realTabs }),
+      });
 
-  // --- Cleanup banner (stale tabs) ---
+      if (clusterRes.ok) {
+        const clusterData = await clusterRes.json();
+        openTabMissions = clusterData.missions || [];
+      }
+    } catch (err) {
+      console.warn('[TMC] Could not cluster open tabs:', err);
+    }
+  }
+
+  // Render the "Right now" section
+  if (openTabMissions.length > 0 && openTabsSection) {
+    openTabsSectionCount.textContent = `${openTabMissions.length} mission${openTabMissions.length !== 1 ? 's' : ''}`;
+    openTabsMissionsEl.innerHTML = openTabMissions
+      .map((m, idx) => renderOpenTabsMissionCard(m, idx))
+      .join('');
+    openTabsSection.style.display = 'block';
+  } else if (openTabsSection) {
+    openTabsSection.style.display = 'none';
+  }
+
+  // ── Step 3: Fetch history missions ("Pick back up") ──────────────────────
+  // Pass all currently open URLs as a filter so the server can exclude
+  // missions that are already represented in the "Right now" section.
+  const openUrlsParam = realTabs
+    .map(t => encodeURIComponent(t.url))
+    .join(',');
+
+  let historyMissions = [];
+  try {
+    const historyRes = await fetch(`/api/history-missions?openUrls=${openUrlsParam}`);
+    if (historyRes.ok) {
+      historyMissions = await historyRes.json();
+    }
+  } catch (err) {
+    console.warn('[TMC] Could not fetch history missions:', err);
+  }
+
+  // Render the "Pick back up" section
+  const historySection      = document.getElementById('historySection');
+  const historyMissionsEl   = document.getElementById('historyMissions');
+  const historySectionCount = document.getElementById('historySectionCount');
+
+  if (historyMissions.length > 0 && historySection) {
+    historySectionCount.textContent = `${historyMissions.length} mission${historyMissions.length !== 1 ? 's' : ''}`;
+    historyMissionsEl.innerHTML = historyMissions
+      .map(m => renderHistoryMissionCard(m))
+      .join('');
+    historySection.style.display = 'block';
+  } else if (historySection) {
+    historySection.style.display = 'none';
+  }
+
+  // ── Step 4: Scatter bar ───────────────────────────────────────────────────
+  // Scatter = how many parallel open-tab missions exist right now
+  renderScatterBar(openTabMissions.length);
+
+  // ── Step 5: Stale tabs — tabs open but whose missions aren't "Right now" ──
+  // With the new architecture ALL open tabs should be in a mission,
+  // so stale tabs from the cleanup banner perspective are now tabs from the
+  // history section (old missions) that are still open in the browser.
+  // For simplicity: stale = open tabs that weren't in any cluster-tabs mission.
+  const clusteredTabUrls = new Set(
+    openTabMissions.flatMap(m => (m.tabs || []).map(t => t.url))
+  );
+  const staleTabs = realTabs.filter(t => !clusteredTabUrls.has(t.url));
+
+  // Cleanup banner
   const cleanupBanner = document.getElementById('cleanupBanner');
   if (staleTabs.length > 0 && cleanupBanner) {
     document.getElementById('staleTabCount').textContent =
@@ -488,147 +607,27 @@ async function renderDashboard() {
     cleanupBanner.style.display = 'none';
   }
 
-  // --- Nudge banner (abandoned missions) ---
+  // ── Step 6: Nudge banner ──────────────────────────────────────────────────
+  // Show when there are history missions to pick back up
   const nudgeBanner = document.getElementById('nudgeBanner');
   const nudgeText   = document.getElementById('nudgeText');
-  if (abandonedMissions.length > 0 && nudgeBanner && nudgeText) {
-    nudgeText.innerHTML = `<strong>${abandonedMissions.length} mission${abandonedMissions.length !== 1 ? 's' : ''} ${abandonedMissions.length === 1 ? 'has' : 'have'} gone cold.</strong> You started ${abandonedMissions.length === 1 ? 'it' : 'them'} but haven't been back in days. Pick one to finish, or let it go.`;
+  if (historyMissions.length > 0 && nudgeBanner && nudgeText) {
+    nudgeText.innerHTML = `<strong>${historyMissions.length} mission${historyMissions.length !== 1 ? 's' : ''} ${historyMissions.length === 1 ? 'is' : 'are'} waiting.</strong> You did work here but have no tabs open for ${historyMissions.length === 1 ? 'it' : 'them'} now. Pick one to continue, or let it go.`;
     nudgeBanner.style.display = 'flex';
   } else if (nudgeBanner) {
     nudgeBanner.style.display = 'none';
   }
 
-  // --- Active missions section ---
-  const activeSection  = document.getElementById('activeSection');
-  const activeMissionsEl = document.getElementById('activeMissions');
-  const activeSectionCount = document.getElementById('activeSectionCount');
-
-  if (activeMissions.length > 0 && activeSection) {
-    activeSectionCount.textContent = `${activeMissions.length} mission${activeMissions.length !== 1 ? 's' : ''}`;
-    activeMissionsEl.innerHTML = activeMissions.map(m => {
-      const tabCount = countOpenTabsForMission((m.urls || []));
-      return renderMissionCard(m, tabCount);
-    }).join('');
-    activeSection.style.display = 'block';
-  } else if (activeSection) {
-    activeSection.style.display = 'none';
-  }
-
-  // --- Abandoned missions section ---
-  const abandonedSection = document.getElementById('abandonedSection');
-  const abandonedMissionsEl = document.getElementById('abandonedMissions');
-  const abandonedSectionCount = document.getElementById('abandonedSectionCount');
-
-  if (abandonedMissions.length > 0 && abandonedSection) {
-    abandonedSectionCount.textContent = `${abandonedMissions.length} mission${abandonedMissions.length !== 1 ? 's' : ''}`;
-    abandonedMissionsEl.innerHTML = abandonedMissions.map(m => {
-      const tabCount = countOpenTabsForMission((m.urls || []));
-      return renderMissionCard(m, tabCount);
-    }).join('');
-    abandonedSection.style.display = 'block';
-  } else if (abandonedSection) {
-    abandonedSection.style.display = 'none';
-  }
-
-  // --- Uncategorized tabs section ---
-  // Tabs that are open but don't match ANY mission. These fell through the cracks
-  // — either visited too long ago, or filtered as noise, or not in the AI batch.
-  // We group them by domain so they're not a mess.
-  if (extensionAvailable && openTabs.length > 0) {
-    const matchedTabUrls = new Set();
-    for (const m of missions) {
-      const matched = getOpenTabsForMission(m.urls || []);
-      matched.forEach(t => matchedTabUrls.add(t.url));
-    }
-    const unmatchedTabs = openTabs.filter(t => !matchedTabUrls.has(t.url));
-
-    // Filter out chrome:// and extension pages
-    const realUnmatched = unmatchedTabs.filter(t => {
-      return t.url && !t.url.startsWith('chrome') && !t.url.startsWith('about:');
-    });
-
-    // Group by domain
-    const domainGroups = {};
-    for (const tab of realUnmatched) {
-      let domain;
-      try { domain = new URL(tab.url).hostname; } catch { domain = 'other'; }
-      if (!domainGroups[domain]) domainGroups[domain] = [];
-      domainGroups[domain].push(tab);
-    }
-
-    let uncatSection = document.getElementById('uncategorizedSection');
-    if (realUnmatched.length > 0) {
-      if (!uncatSection) {
-        // Create the section if it doesn't exist in HTML
-        uncatSection = document.createElement('div');
-        uncatSection.id = 'uncategorizedSection';
-        uncatSection.className = 'abandoned-section';
-        const abandonedEl = document.getElementById('abandonedSection');
-        const footer = document.querySelector('footer');
-        if (abandonedEl) {
-          abandonedEl.after(uncatSection);
-        } else {
-          footer.before(uncatSection);
-        }
-      }
-
-      const domainEntries = Object.entries(domainGroups).sort((a, b) => b[1].length - a[1].length);
-
-      uncatSection.style.display = 'block';
-      uncatSection.innerHTML = `
-        <div class="section-header">
-          <h2>Uncategorized tabs</h2>
-          <div class="section-line"></div>
-          <div class="section-count">${realUnmatched.length} tab${realUnmatched.length !== 1 ? 's' : ''}</div>
-        </div>
-        <div class="missions">
-          ${domainEntries.map(([domain, tabs]) => `
-            <div class="mission-card" data-domain="${domain}">
-              <div class="status-bar" style="background: var(--muted);"></div>
-              <div class="mission-content">
-                <div class="mission-top">
-                  <span class="mission-name">${domain}</span>
-                  <span class="open-tabs-badge">${ICONS.tabs} ${tabs.length} tab${tabs.length !== 1 ? 's' : ''} open</span>
-                </div>
-                <div class="mission-summary">Open tabs not matched to any mission.</div>
-                <div class="mission-pages">
-                  ${tabs.slice(0, 4).map(t => {
-                    const label = t.title || t.url;
-                    const display = label.length > 40 ? label.slice(0, 40) + '…' : label;
-                    return `<span class="page-chip">${display}</span>`;
-                  }).join('')}
-                  ${tabs.length > 4 ? `<span class="page-chip">+${tabs.length - 4} more</span>` : ''}
-                </div>
-                <div class="actions">
-                  <button class="action-btn close-tabs" data-action="close-uncat" data-domain="${domain}">
-                    ${ICONS.close}
-                    Close ${tabs.length} tab${tabs.length !== 1 ? 's' : ''}
-                  </button>
-                </div>
-              </div>
-              <div class="mission-meta">
-                <div class="mission-page-count">${tabs.length}</div>
-                <div class="mission-page-label">tab${tabs.length !== 1 ? 's' : ''}</div>
-              </div>
-            </div>
-          `).join('')}
-        </div>
-      `;
-    } else if (uncatSection) {
-      uncatSection.style.display = 'none';
-    }
-  }
-
-  // --- Footer stats ---
+  // ── Step 7: Footer stats ──────────────────────────────────────────────────
   const statMissions = document.getElementById('statMissions');
   const statTabs     = document.getElementById('statTabs');
   const statStale    = document.getElementById('statStale');
-  if (statMissions) statMissions.textContent = missions.length;
-  if (statTabs)     statTabs.textContent = openTabs.length;
-  if (statStale)    statStale.textContent = staleTabs.length;
+  // "Missions" in the footer = open-tab missions (the primary view)
+  if (statMissions) statMissions.textContent = openTabMissions.length;
+  if (statTabs)     statTabs.textContent     = openTabs.length;
+  if (statStale)    statStale.textContent    = staleTabs.length;
 
-  // --- Last refresh time ---
-  // Try to get this from the API (/api/stats), fall back to "just now"
+  // Last refresh time (from the history analysis, not the tab clustering)
   const lastRefreshEl = document.getElementById('lastRefreshTime');
   if (lastRefreshEl) {
     try {
@@ -636,13 +635,13 @@ async function renderDashboard() {
       if (statsRes.ok) {
         const stats = await statsRes.json();
         lastRefreshEl.textContent = stats.lastAnalysis
-          ? `Last analyzed ${timeAgo(stats.lastAnalysis)}`
-          : 'Last analyzed just now';
+          ? `History last analyzed ${timeAgo(stats.lastAnalysis)}`
+          : 'History not yet analyzed';
       } else {
-        lastRefreshEl.textContent = 'Last analyzed just now';
+        lastRefreshEl.textContent = 'History not yet analyzed';
       }
     } catch {
-      lastRefreshEl.textContent = 'Last analyzed just now';
+      lastRefreshEl.textContent = 'History not yet analyzed';
     }
   }
 }
@@ -686,8 +685,32 @@ document.addEventListener('click', async (e) => {
   // Find the card element so we can animate it
   const card = actionEl.closest('.mission-card');
 
-  // ---- close-tabs: close all tabs belonging to this mission ----
-  if (action === 'close-tabs') {
+  // ---- close-open-tabs: close all tabs for an open-tab-clustered mission ----
+  // These missions don't have DB IDs — they're identified by their index in
+  // the in-memory openTabMissions array.
+  if (action === 'close-open-tabs') {
+    const missionIdx = parseInt(actionEl.dataset.openMissionIdx, 10);
+    const mission = openTabMissions[missionIdx];
+    if (!mission) return;
+
+    const urls = (mission.tabs || []).map(t => t.url);
+    await closeTabsByUrls(urls);
+
+    // Animate the card out — the mission is "done" once all tabs are closed
+    if (card) {
+      card.classList.add('closing');
+      setTimeout(() => card.remove(), 400);
+    }
+
+    // Remove from in-memory store so stale count stays accurate
+    openTabMissions.splice(missionIdx, 1);
+
+    await updateStaleCount();
+    showToast(`Closed tabs for "${mission.name}"`);
+  }
+
+  // ---- close-tabs: close all tabs belonging to a history mission ----
+  else if (action === 'close-tabs') {
     const mission = await fetchMissionById(missionId);
     if (!mission) return;
 
@@ -812,58 +835,49 @@ document.addEventListener('click', async (e) => {
 /**
  * handleCloseAllStale()
  *
- * Closes ALL tabs that belong to non-active missions at once.
- * This is the nuclear option — Zara hits "Close all stale tabs"
- * and everything from abandoned/cold missions gets cleared.
+ * Closes all tabs that weren't assigned to any open-tab mission.
+ * With the new architecture, "stale" means tabs that somehow slipped
+ * through the AI clustering (shouldn't happen, but could with edge cases).
  */
 async function handleCloseAllStale() {
-  // Collect all missions, find tabs for non-active ones
-  let missions = [];
-  try {
-    const res = await fetch('/api/missions');
-    if (res.ok) missions = await res.json();
-  } catch { /* silent fail */ }
+  // Stale tabs = open real tabs not in any clustered mission
+  const clusteredTabUrls = new Set(
+    openTabMissions.flatMap(m => (m.tabs || []).map(t => t.url))
+  );
 
-  const nonActiveMissions = missions.filter(m => m.status !== 'active');
-  const urlsToClose = nonActiveMissions.flatMap(m => (m.urls || []));
-
-  await closeTabsByUrls(urlsToClose);
-
-  // Remove all stale badges and close-tab buttons from the DOM
-  document.querySelectorAll('.open-tabs-badge').forEach(badge => {
-    // Only remove if the badge's parent card is NOT an active mission
-    const card = badge.closest('.mission-card');
-    const isActive = card?.querySelector('.mission-tag.active');
-    if (!isActive) {
-      badge.style.transition = 'opacity 0.3s';
-      badge.style.opacity = '0';
-      setTimeout(() => badge.remove(), 300);
-    }
+  // Filter to real browser tabs only (not chrome:// etc.)
+  const realTabs = openTabs.filter(t => {
+    const url = t.url || '';
+    return (
+      !url.startsWith('chrome://') &&
+      !url.startsWith('chrome-extension://') &&
+      !url.startsWith('about:') &&
+      !url.startsWith('edge://') &&
+      !url.startsWith('brave://')
+    );
   });
 
-  document.querySelectorAll('.action-btn.close-tabs').forEach(btn => {
-    const card = btn.closest('.mission-card');
-    const isActive = card?.querySelector('.mission-tag.active');
-    if (!isActive) {
-      btn.style.transition = 'opacity 0.2s';
-      btn.style.opacity = '0';
-      setTimeout(() => btn.remove(), 200);
-    }
-  });
+  const staleUrls = realTabs
+    .filter(t => !clusteredTabUrls.has(t.url))
+    .map(t => t.url);
+
+  if (staleUrls.length > 0) {
+    await closeTabsByUrls(staleUrls);
+  }
 
   // Hide the cleanup banner
   const banner = document.getElementById('cleanupBanner');
   if (banner) {
     banner.style.transition = 'opacity 0.4s';
     banner.style.opacity = '0';
-    setTimeout(() => { banner.style.display = 'none'; }, 400);
+    setTimeout(() => { banner.style.display = 'none'; banner.style.opacity = '1'; }, 400);
   }
 
-  // Update stale count in footer
+  // Update footer stats
   const statStale = document.getElementById('statStale');
   const statTabs  = document.getElementById('statTabs');
   if (statStale) statStale.textContent = '0';
-  if (statTabs)  statTabs.textContent = openTabs.length;
+  if (statTabs)  statTabs.textContent  = openTabs.length;
 
   showToast('Closed all stale tabs. Breathing room restored.');
 }
@@ -920,39 +934,42 @@ async function fetchMissionById(missionId) {
 /**
  * updateStaleCount()
  *
- * Recalculates and updates the stale tab count in the footer
- * and cleanup banner after an action (e.g. closing some tabs).
+ * Recalculates stale tabs after a close action and updates the footer + banner.
+ * In the new architecture, stale = open real tabs not covered by any clustered mission.
  */
 async function updateStaleCount() {
-  await fetchOpenTabs(); // refresh our tab list first
+  await fetchOpenTabs(); // refresh our live tab list first
 
-  let missions = [];
-  try {
-    const res = await fetch('/api/missions');
-    if (res.ok) missions = await res.json();
-  } catch { /* silent fail */ }
+  // Recalculate which tabs are "stale" (not in any open-tab mission)
+  const clusteredTabUrls = new Set(
+    openTabMissions.flatMap(m => (m.tabs || []).map(t => t.url))
+  );
 
-  const activeMissions = missions.filter(m => m.status === 'active' || m.status === 'cooling');
-
-  const staleTabs = openTabs.filter(tab => {
-    const matchesActive = activeMissions.some(m => {
-      return getOpenTabsForMission((m.urls || []))
-        .some(t => t.url === tab.url);
-    });
-    return !matchesActive;
+  const realTabs = openTabs.filter(t => {
+    const url = t.url || '';
+    return (
+      !url.startsWith('chrome://') &&
+      !url.startsWith('chrome-extension://') &&
+      !url.startsWith('about:') &&
+      !url.startsWith('edge://') &&
+      !url.startsWith('brave://')
+    );
   });
 
+  const staleTabs = realTabs.filter(t => !clusteredTabUrls.has(t.url));
+
+  // Update footer numbers
   const statStale = document.getElementById('statStale');
   const statTabs  = document.getElementById('statTabs');
   if (statStale) statStale.textContent = staleTabs.length;
-  if (statTabs)  statTabs.textContent = openTabs.length;
+  if (statTabs)  statTabs.textContent  = openTabs.length;
 
-  // Update banner text
+  // Update or hide the cleanup banner
   const staleTabCountEl = document.getElementById('staleTabCount');
   const cleanupBanner   = document.getElementById('cleanupBanner');
   if (staleTabs.length > 0) {
     if (staleTabCountEl) staleTabCountEl.textContent = `${staleTabs.length} stale tab${staleTabs.length !== 1 ? 's' : ''}`;
-    if (cleanupBanner) cleanupBanner.style.display = 'flex';
+    if (cleanupBanner)   cleanupBanner.style.display = 'flex';
   } else {
     if (cleanupBanner) {
       cleanupBanner.style.transition = 'opacity 0.4s';
