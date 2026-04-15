@@ -25,6 +25,396 @@
 
 // All open tabs — populated by fetchOpenTabs()
 let openTabs = [];
+let bookmarksBarItems = [];
+let frequentSites = [];
+let shortcutMenuOpenFor = null;
+
+const SHORTCUTS_STORAGE_KEY = 'topShortcuts';
+const SHORTCUT_LIMIT = 10;
+
+/* ----------------------------------------------------------------
+   SEARCH + BOOKMARKS BRIDGE
+   ---------------------------------------------------------------- */
+
+async function fetchBookmarksBarItems() {
+  if (!chrome.bookmarks?.getTree) {
+    bookmarksBarItems = [];
+    return [];
+  }
+
+  try {
+    const tree = await chrome.bookmarks.getTree();
+    const root = tree?.[0];
+    const candidates = root?.children || [];
+    const bookmarksBar = candidates.find(node =>
+      node.id === '1' ||
+      node.title === 'Bookmarks bar' ||
+      node.title === 'Bookmarks Bar'
+    ) || candidates[0];
+
+    bookmarksBarItems = (bookmarksBar?.children || []).filter(item => item.url || item.children?.length);
+    return bookmarksBarItems;
+  } catch (err) {
+    console.warn('[tab-out] Could not read bookmarks bar:', err);
+    bookmarksBarItems = [];
+    return [];
+  }
+}
+
+async function fetchTopSites() {
+  if (!chrome.topSites?.get) {
+    frequentSites = [];
+    return [];
+  }
+
+  try {
+    const sites = await chrome.topSites.get();
+    const deduped = [];
+    const seen = new Set();
+
+    for (const site of sites) {
+      if (!site?.url) continue;
+      const key = site.url.replace(/\/$/, '');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(site);
+      if (deduped.length >= 10) break;
+    }
+
+    frequentSites = deduped;
+    return frequentSites;
+  } catch (err) {
+    console.warn('[tab-out] Could not read top sites:', err);
+    frequentSites = [];
+    return [];
+  }
+}
+
+async function getShortcutPrefs() {
+  const {
+    [SHORTCUTS_STORAGE_KEY]: stored = {
+      customShortcuts: [],
+      hiddenTopSites: [],
+    },
+  } = await chrome.storage.local.get(SHORTCUTS_STORAGE_KEY);
+
+  return {
+    customShortcuts: Array.isArray(stored.customShortcuts) ? stored.customShortcuts : [],
+    hiddenTopSites: Array.isArray(stored.hiddenTopSites) ? stored.hiddenTopSites : [],
+  };
+}
+
+async function saveShortcutPrefs(next) {
+  await chrome.storage.local.set({
+    [SHORTCUTS_STORAGE_KEY]: {
+      customShortcuts: Array.isArray(next.customShortcuts) ? next.customShortcuts : [],
+      hiddenTopSites: Array.isArray(next.hiddenTopSites) ? next.hiddenTopSites : [],
+    },
+  });
+}
+
+function normalizeSearchInput(value) {
+  return (value || '').trim();
+}
+
+function looksLikeUrl(value) {
+  if (!value) return false;
+  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(value)) return true;
+  if (/\s/.test(value)) return false;
+  if (value.startsWith('localhost')) return true;
+  return value.includes('.') || value.startsWith('/');
+}
+
+function toNavigableUrl(value) {
+  if (!value) return '';
+  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(value)) return value;
+  if (value.startsWith('/')) return `file://${value}`;
+  return `https://${value}`;
+}
+
+function buildSearchUrl(query) {
+  return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+}
+
+function hostnameFromUrl(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+async function openInCurrentTab(url) {
+  if (!url) return;
+  const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (currentTab?.id) {
+    await chrome.tabs.update(currentTab.id, { url });
+    return;
+  }
+  await chrome.tabs.create({ url });
+}
+
+async function handleSearchSubmit(rawValue) {
+  const value = normalizeSearchInput(rawValue);
+  if (!value) return;
+
+  const target = looksLikeUrl(value) ? toNavigableUrl(value) : buildSearchUrl(value);
+  await openInCurrentTab(target);
+}
+
+function bookmarkIconLetter(item) {
+  const source = item.title || item.url || '?';
+  return source.trim().charAt(0).toUpperCase() || '?';
+}
+
+function faviconUrl(url) {
+  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(url)}&sz=64`;
+}
+
+function siteLabel(site) {
+  const title = (site.title || '').trim();
+  if (title) return title.length > 18 ? `${title.slice(0, 18)}...` : title;
+
+  const host = hostnameFromUrl(site.url);
+  return host || 'Shortcut';
+}
+
+function normalizeShortcutUrl(value) {
+  const raw = normalizeSearchInput(value);
+  if (!raw) return '';
+  return looksLikeUrl(raw) ? toNavigableUrl(raw) : '';
+}
+
+function makeShortcutId(prefix = 'shortcut') {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeSiteKey(url) {
+  return (url || '').trim().replace(/\/$/, '');
+}
+
+function topSiteSourceId(url) {
+  return `top:${normalizeSiteKey(url)}`;
+}
+
+function escapeHtml(value) {
+  return (value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderBookmarkItem(item) {
+  const safeTitle = escapeHtml(item.title || item.url || 'Untitled bookmark');
+  const safeUrl = (item.url || '').replace(/"/g, '&quot;');
+  const icon = item.url ? faviconUrl(item.url) : '';
+
+  if (item.url) {
+    return `
+      <a class="bookmark-pill" href="${safeUrl}" target="_top" title="${safeTitle}">
+        <img class="bookmark-favicon" src="${icon}" alt="" loading="lazy">
+        <span class="bookmark-pill-label">${safeTitle}</span>
+      </a>
+    `;
+  }
+
+  const count = item.children?.length || 0;
+  return `
+    <button class="bookmark-pill folder" type="button" data-action="open-bookmark-folder" data-bookmark-id="${item.id}" title="${safeTitle}">
+      <span class="bookmark-pill-icon" aria-hidden="true">+</span>
+      <span class="bookmark-pill-label">${safeTitle}</span>
+      <span class="bookmark-pill-meta">${count}</span>
+    </button>
+  `;
+}
+
+async function renderBookmarksStrip() {
+  const listEl = document.getElementById('bookmarksList');
+  const emptyEl = document.getElementById('bookmarksEmpty');
+  if (!listEl || !emptyEl) return;
+
+  const items = await fetchBookmarksBarItems();
+  if (items.length === 0) {
+    listEl.innerHTML = '';
+    emptyEl.style.display = 'block';
+    return;
+  }
+
+  emptyEl.style.display = 'none';
+  listEl.innerHTML = items.map(renderBookmarkItem).join('');
+}
+
+function renderTopSiteItem(site) {
+  const safeUrl = (site.url || '').replace(/"/g, '&quot;');
+  const label = site.displayName || siteLabel(site);
+  const safeLabel = escapeHtml(label);
+  const safeHost = escapeHtml(hostnameFromUrl(site.url));
+  const icon = faviconUrl(site.url);
+  const sourceId = site.sourceId || topSiteSourceId(site.url);
+  const safeSourceId = escapeHtml(sourceId);
+  const menuOpen = shortcutMenuOpenFor === sourceId;
+
+  return `
+    <div class="top-site${menuOpen ? ' menu-open' : ''}" data-shortcut-card="${safeSourceId}">
+      <button class="top-site-menu-trigger" type="button" data-action="toggle-shortcut-menu" data-shortcut-id="${safeSourceId}" aria-label="Shortcut options">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="5" r="1.8"></circle>
+          <circle cx="12" cy="12" r="1.8"></circle>
+          <circle cx="12" cy="19" r="1.8"></circle>
+        </svg>
+      </button>
+      <div class="top-site-menu${menuOpen ? ' visible' : ''}">
+        <button type="button" data-action="edit-shortcut" data-shortcut-id="${safeSourceId}">Edit shortcut</button>
+        <button type="button" data-action="remove-shortcut" data-shortcut-id="${safeSourceId}">Remove</button>
+      </div>
+      <a class="top-site-link" href="${safeUrl}" target="_top" title="${safeLabel}">
+        <span class="top-site-icon-wrap">
+          <span class="top-site-icon">
+            <img src="${icon}" alt="" loading="lazy">
+          </span>
+        </span>
+        <span class="top-site-label">${safeLabel}</span>
+        <span class="sr-only">${safeHost}</span>
+      </a>
+    </div>
+  `;
+}
+
+function renderAddShortcutCard() {
+  return `
+    <div class="top-site add-shortcut-card" data-shortcut-card="add-shortcut">
+      <button class="top-site-link top-site-add-btn" type="button" data-action="open-add-shortcut" title="Add shortcut">
+        <span class="top-site-icon-wrap">
+          <span class="top-site-icon add-shortcut-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+            </svg>
+          </span>
+        </span>
+        <span class="top-site-label">Add shortcut</span>
+      </button>
+    </div>
+  `;
+}
+
+async function buildVisibleShortcuts() {
+  const [sites, prefs] = await Promise.all([fetchTopSites(), getShortcutPrefs()]);
+  const hidden = new Set(prefs.hiddenTopSites.map(normalizeSiteKey));
+  const custom = prefs.customShortcuts.map(item => ({
+    ...item,
+    kind: 'custom',
+    sourceId: item.id,
+    displayName: item.name,
+  }));
+
+  const top = sites
+    .filter(site => !hidden.has(normalizeSiteKey(site.url)))
+    .filter(site => !custom.some(customItem => normalizeSiteKey(customItem.url) === normalizeSiteKey(site.url)))
+    .map(site => ({
+      ...site,
+      kind: 'top',
+      sourceId: topSiteSourceId(site.url),
+      displayName: siteLabel(site),
+    }));
+
+  return [...custom, ...top].slice(0, SHORTCUT_LIMIT);
+}
+
+function findShortcutBySourceId(items, sourceId) {
+  return items.find(item => item.sourceId === sourceId) || null;
+}
+
+function openShortcutModal(mode, item = null) {
+  const backdrop = document.getElementById('shortcutModalBackdrop');
+  const title = document.getElementById('shortcutModalTitle');
+  const submit = document.getElementById('shortcutSubmit');
+  const modeInput = document.getElementById('shortcutFormMode');
+  const sourceIdInput = document.getElementById('shortcutFormSourceId');
+  const nameInput = document.getElementById('shortcutName');
+  const urlInput = document.getElementById('shortcutUrl');
+  const errorEl = document.getElementById('shortcutFormError');
+  if (!backdrop || !title || !submit || !modeInput || !sourceIdInput || !nameInput || !urlInput || !errorEl) return;
+
+  title.textContent = mode === 'edit' ? 'Edit shortcut' : 'Add shortcut';
+  submit.textContent = mode === 'edit' ? 'Save' : 'Add';
+  modeInput.value = mode;
+  sourceIdInput.value = item?.sourceId || '';
+  nameInput.value = item?.displayName || '';
+  urlInput.value = item?.url || '';
+  errorEl.style.display = 'none';
+  errorEl.textContent = '';
+  backdrop.hidden = false;
+  requestAnimationFrame(() => nameInput.focus());
+}
+
+function closeShortcutModal() {
+  const backdrop = document.getElementById('shortcutModalBackdrop');
+  const errorEl = document.getElementById('shortcutFormError');
+  if (backdrop) backdrop.hidden = true;
+  if (errorEl) {
+    errorEl.style.display = 'none';
+    errorEl.textContent = '';
+  }
+}
+
+async function upsertShortcutFromForm(mode, sourceId, name, rawUrl) {
+  const prefs = await getShortcutPrefs();
+  const url = normalizeShortcutUrl(rawUrl);
+  const trimmedName = normalizeSearchInput(name);
+
+  if (!trimmedName || !url) {
+    return { ok: false, message: 'Please enter a name and a valid URL.' };
+  }
+
+  const customShortcuts = [...prefs.customShortcuts];
+
+  if (mode === 'edit') {
+    const existingIdx = customShortcuts.findIndex(item => item.id === sourceId);
+    if (existingIdx !== -1) {
+      customShortcuts[existingIdx] = { ...customShortcuts[existingIdx], name: trimmedName, url };
+      await saveShortcutPrefs({ ...prefs, customShortcuts });
+      return { ok: true, message: 'Shortcut updated.' };
+    }
+
+    const normalizedSourceUrl = sourceId.startsWith('top:') ? sourceId.slice(4) : '';
+    const hiddenTopSites = Array.from(new Set([...prefs.hiddenTopSites, normalizedSourceUrl].filter(Boolean)));
+    customShortcuts.unshift({ id: makeShortcutId(), name: trimmedName, url });
+    await saveShortcutPrefs({ customShortcuts, hiddenTopSites });
+    return { ok: true, message: 'Shortcut updated.' };
+  }
+
+  customShortcuts.unshift({ id: makeShortcutId(), name: trimmedName, url });
+  await saveShortcutPrefs({ ...prefs, customShortcuts });
+  return { ok: true, message: 'Shortcut added.' };
+}
+
+async function removeShortcutBySourceId(sourceId) {
+  const prefs = await getShortcutPrefs();
+
+  if (sourceId.startsWith('top:')) {
+    const hiddenTopSites = Array.from(new Set([...prefs.hiddenTopSites, sourceId.slice(4)]));
+    await saveShortcutPrefs({ ...prefs, hiddenTopSites });
+    return 'Shortcut removed.';
+  }
+
+  const customShortcuts = prefs.customShortcuts.filter(item => item.id !== sourceId);
+  await saveShortcutPrefs({ ...prefs, customShortcuts });
+  return 'Shortcut removed.';
+}
+
+async function renderTopSites() {
+  const listEl = document.getElementById('topSitesList');
+  const emptyEl = document.getElementById('topSitesEmpty');
+  if (!listEl || !emptyEl) return;
+
+  const sites = await buildVisibleShortcuts();
+  emptyEl.style.display = sites.length === 0 ? 'block' : 'none';
+  const cards = sites.map(renderTopSiteItem);
+  if (sites.length < SHORTCUT_LIMIT) cards.push(renderAddShortcutCard());
+  listEl.innerHTML = cards.join('');
+}
 
 /**
  * fetchOpenTabs()
@@ -769,7 +1159,7 @@ function buildOverflowChips(hiddenTabs, urlCounts = {}) {
     try { domain = new URL(tab.url).hostname; } catch {}
     const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
-      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
+      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="">` : ''}
       <span class="chip-text">${label}</span>${dupeTag}
       <div class="chip-actions">
         <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
@@ -850,7 +1240,7 @@ function renderDomainCard(group) {
     try { domain = new URL(tab.url).hostname; } catch {}
     const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
-      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
+        ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="">` : ''}
       <span class="chip-text">${label}</span>${dupeTag}
       <div class="chip-actions">
         <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
@@ -974,7 +1364,7 @@ function renderDeferredItem(item) {
       <input type="checkbox" class="deferred-checkbox" data-action="check-deferred" data-deferred-id="${item.id}">
       <div class="deferred-info">
         <a href="${item.url}" target="_blank" rel="noopener" class="deferred-title" title="${(item.title || '').replace(/"/g, '&quot;')}">
-          <img src="${faviconUrl}" alt="" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px" onerror="this.style.display='none'">${item.title || item.url}
+          <img class="deferred-favicon" src="${faviconUrl}" alt="">${item.title || item.url}
         </a>
         <div class="deferred-meta">
           <span>${domain}</span>
@@ -1025,6 +1415,8 @@ async function renderStaticDashboard() {
   const dateEl     = document.getElementById('dateDisplay');
   if (greetingEl) greetingEl.textContent = getGreeting();
   if (dateEl)     dateEl.textContent     = getDateDisplay();
+  await renderTopSites();
+  await renderBookmarksStrip();
 
   // --- Fetch tabs ---
   await fetchOpenTabs();
@@ -1431,6 +1823,131 @@ document.addEventListener('click', async (e) => {
     showToast('All tabs closed. Fresh start.');
     return;
   }
+
+  if (action === 'open-bookmark-folder') {
+    const folderId = actionEl.dataset.bookmarkId;
+    if (!folderId || !chrome.bookmarks?.getSubTree) return;
+
+    try {
+      const nodes = await chrome.bookmarks.getSubTree(folderId);
+      const folder = nodes?.[0];
+      const firstLink = folder?.children?.find(child => !!child.url);
+      if (firstLink?.url) {
+        await openInCurrentTab(firstLink.url);
+        return;
+      }
+      await chrome.tabs.create({ url: 'chrome://bookmarks/' });
+    } catch (err) {
+      console.warn('[tab-out] Could not open bookmark folder:', err);
+    }
+    return;
+  }
+
+  if (action === 'toggle-shortcut-menu') {
+    e.preventDefault();
+    e.stopPropagation();
+    const sourceId = actionEl.dataset.shortcutId;
+    shortcutMenuOpenFor = shortcutMenuOpenFor === sourceId ? null : sourceId;
+    await renderTopSites();
+    return;
+  }
+
+  if (action === 'open-add-shortcut') {
+    shortcutMenuOpenFor = null;
+    openShortcutModal('create');
+    return;
+  }
+
+  if (action === 'edit-shortcut') {
+    e.preventDefault();
+    e.stopPropagation();
+    const sourceId = actionEl.dataset.shortcutId;
+    const items = await buildVisibleShortcuts();
+    const item = findShortcutBySourceId(items, sourceId);
+    shortcutMenuOpenFor = null;
+    await renderTopSites();
+    if (item) openShortcutModal('edit', item);
+    return;
+  }
+
+  if (action === 'remove-shortcut') {
+    e.preventDefault();
+    e.stopPropagation();
+    const sourceId = actionEl.dataset.shortcutId;
+    shortcutMenuOpenFor = null;
+    const message = await removeShortcutBySourceId(sourceId);
+    await renderTopSites();
+    showToast(message);
+    return;
+  }
+});
+
+document.addEventListener('submit', async (e) => {
+  if (e.target.id === 'nativeSearchForm') {
+    e.preventDefault();
+
+    const input = document.getElementById('nativeSearchInput');
+    await handleSearchSubmit(input?.value || '');
+    return;
+  }
+
+  if (e.target.id === 'shortcutForm') {
+    e.preventDefault();
+    const mode = document.getElementById('shortcutFormMode')?.value || 'create';
+    const sourceId = document.getElementById('shortcutFormSourceId')?.value || '';
+    const name = document.getElementById('shortcutName')?.value || '';
+    const url = document.getElementById('shortcutUrl')?.value || '';
+    const errorEl = document.getElementById('shortcutFormError');
+
+    const result = await upsertShortcutFromForm(mode, sourceId, name, url);
+    if (!result.ok) {
+      if (errorEl) {
+        errorEl.textContent = result.message;
+        errorEl.style.display = 'block';
+      }
+      return;
+    }
+
+    closeShortcutModal();
+    await renderTopSites();
+    showToast(result.message);
+  }
+});
+
+document.addEventListener('click', async (e) => {
+  const openManagerBtn = e.target.closest('#bookmarksOpenManager');
+  if (!openManagerBtn) return;
+
+  await chrome.tabs.create({ url: 'chrome://bookmarks/' });
+});
+
+document.addEventListener('click', async (e) => {
+  if (e.target.closest('.top-site')) return;
+  if (shortcutMenuOpenFor) {
+    shortcutMenuOpenFor = null;
+    await renderTopSites();
+  }
+});
+
+document.addEventListener('click', (e) => {
+  const closeBtn = e.target.closest('#shortcutModalClose, #shortcutCancel');
+  const backdrop = e.target.id === 'shortcutModalBackdrop';
+  if (!closeBtn && !backdrop) return;
+  closeShortcutModal();
+});
+
+document.addEventListener('keydown', async (e) => {
+  if (e.key === 'Escape') {
+    if (shortcutMenuOpenFor) {
+      shortcutMenuOpenFor = null;
+      await renderTopSites();
+      return;
+    }
+    const backdrop = document.getElementById('shortcutModalBackdrop');
+    if (backdrop && !backdrop.hidden) {
+      closeShortcutModal();
+    }
+  }
 });
 
 // ---- Archive toggle — expand/collapse the archive section ----
@@ -1474,6 +1991,26 @@ document.addEventListener('input', async (e) => {
     console.warn('[tab-out] Archive search failed:', err);
   }
 });
+
+document.addEventListener('error', (e) => {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement)) return;
+  if (!img.matches('.chip-favicon, .deferred-favicon, .top-site-icon img')) return;
+  img.style.display = 'none';
+}, true);
+
+if (chrome.bookmarks) {
+  const rerenderBookmarks = () => renderBookmarksStrip();
+  chrome.bookmarks.onCreated.addListener(rerenderBookmarks);
+  chrome.bookmarks.onRemoved.addListener(rerenderBookmarks);
+  chrome.bookmarks.onChanged.addListener(rerenderBookmarks);
+  chrome.bookmarks.onMoved.addListener(rerenderBookmarks);
+  chrome.bookmarks.onChildrenReordered.addListener(rerenderBookmarks);
+}
+
+if (chrome.topSites) {
+  chrome.topSites.onUpdated?.addListener(() => renderTopSites());
+}
 
 
 /* ----------------------------------------------------------------

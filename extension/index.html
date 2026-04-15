@@ -28,6 +28,42 @@
     </div>
   </header>
 
+  <section class="native-bridge" aria-label="Search and frequent sites">
+    <div class="native-search-stage">
+      <div class="google-mark" aria-hidden="true">
+        <span class="g-blue">G</span><span class="g-red">o</span><span class="g-yellow">o</span><span class="g-blue">g</span><span class="g-green">l</span><span class="g-red">e</span>
+      </div>
+
+      <form class="native-search" id="nativeSearchForm">
+        <label class="sr-only" for="nativeSearchInput">Search or enter address</label>
+        <div class="native-search-shell">
+          <svg class="native-search-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-4.35-4.35m1.85-5.15a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z" />
+          </svg>
+          <input
+            id="nativeSearchInput"
+            class="native-search-input"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Search Google or type a URL"
+          >
+          <div class="native-search-actions" aria-hidden="true">
+            <span class="native-search-glyph">⌘K</span>
+          </div>
+        </div>
+      </form>
+
+      <section class="top-sites" aria-labelledby="topSitesTitle">
+        <h2 class="sr-only" id="topSitesTitle">Frequent sites</h2>
+        <div class="top-sites-list" id="topSitesList"></div>
+        <p class="top-sites-empty" id="topSitesEmpty" style="display:none">
+          Open a few sites and Chrome will start suggesting them here.
+        </p>
+      </section>
+    </div>
+  </section>
+
   <!-- ================================================================
        TAB OUT DUPES BANNER — appears when you have extra Tab Out tabs open
        Hidden by default; app.js shows it when dupeTabOutCount > 1
@@ -113,6 +149,21 @@
 
 </div><!-- end .container -->
 
+<section class="bookmarks-strip" aria-labelledby="bookmarksStripTitle">
+  <div class="bookmarks-strip-header">
+    <h2 class="sr-only" id="bookmarksStripTitle">Bookmarks bar</h2>
+    <button class="bookmarks-more" type="button" id="bookmarksOpenManager" aria-label="Open bookmark manager">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5m-16.5 5.25h16.5m-16.5 5.25h16.5" />
+      </svg>
+    </button>
+  </div>
+  <div class="bookmarks-list" id="bookmarksList"></div>
+  <p class="bookmarks-empty" id="bookmarksEmpty" style="display:none">
+    No bookmarks on your bookmarks bar yet.
+  </p>
+</section>
+
 <!-- ================================================================
      TOAST — floats above everything, used for action confirmations
      Hidden by default via CSS (opacity:0, translateY)
@@ -125,9 +176,39 @@
   <span id="toastText"></span>
 </div>
 
+<div class="shortcut-modal-backdrop" id="shortcutModalBackdrop" hidden>
+  <div class="shortcut-modal" role="dialog" aria-modal="true" aria-labelledby="shortcutModalTitle">
+    <div class="shortcut-modal-header">
+      <h2 id="shortcutModalTitle">Add shortcut</h2>
+      <button class="shortcut-modal-close" type="button" id="shortcutModalClose" aria-label="Close">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.2" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+    <form class="shortcut-form" id="shortcutForm">
+      <input type="hidden" id="shortcutFormMode" value="create">
+      <input type="hidden" id="shortcutFormSourceId" value="">
+      <div class="shortcut-field">
+        <label for="shortcutName">Name</label>
+        <input id="shortcutName" type="text" maxlength="40" placeholder="ChatGPT">
+      </div>
+      <div class="shortcut-field">
+        <label for="shortcutUrl">URL</label>
+        <input id="shortcutUrl" type="text" placeholder="https://chatgpt.com">
+      </div>
+      <p class="shortcut-form-error" id="shortcutFormError" style="display:none"></p>
+      <div class="shortcut-form-actions">
+        <button class="shortcut-secondary-btn" type="button" id="shortcutCancel">Cancel</button>
+        <button class="shortcut-primary-btn" type="submit" id="shortcutSubmit">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- Personal config (gitignored) — defines LOCAL_LANDING_PAGE_PATTERNS etc. -->
 <!-- If the file doesn't exist, that's fine — app.js uses sensible defaults. -->
-<script src="config.local.js" onerror="/* no personal config, that's fine */"></script>
+<script src="config.local.js"></script>
 
 <!-- Main dashboard logic — loads last so the DOM is ready -->
 <script src="app.js"></script>
