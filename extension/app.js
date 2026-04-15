@@ -28,6 +28,7 @@ let openTabs = [];
 let bookmarksBarItems = [];
 let frequentSites = [];
 let shortcutMenuOpenFor = null;
+let expandedBookmarkFolders = new Set();
 
 const SHORTCUTS_STORAGE_KEY = 'topShortcuts';
 const SHORTCUT_LIMIT = 10;
@@ -207,26 +208,42 @@ function escapeHtml(value) {
 }
 
 function renderBookmarkItem(item) {
+  return renderBookmarkNode(item, 0);
+}
+
+function renderBookmarkNode(item, depth = 0) {
   const safeTitle = escapeHtml(item.title || item.url || 'Untitled bookmark');
   const safeUrl = (item.url || '').replace(/"/g, '&quot;');
   const icon = item.url ? faviconUrl(item.url) : '';
 
   if (item.url) {
     return `
-      <a class="bookmark-pill" href="${safeUrl}" target="_top" title="${safeTitle}">
+      <a class="bookmark-pill bookmark-link" href="${safeUrl}" target="_top" title="${safeTitle}" style="--bookmark-depth:${depth}">
         <img class="bookmark-favicon" src="${icon}" alt="" loading="lazy">
         <span class="bookmark-pill-label">${safeTitle}</span>
       </a>
     `;
   }
 
-  const count = item.children?.length || 0;
+  const children = (item.children || []).filter(child => child.url || child.children?.length);
+  const count = children.length;
+  const isExpanded = expandedBookmarkFolders.has(item.id);
+  const safeId = escapeHtml(item.id || '');
+  const childMarkup = isExpanded
+    ? children.map(child => renderBookmarkNode(child, depth + 1)).join('')
+    : '';
+
   return `
-    <button class="bookmark-pill folder" type="button" data-action="open-bookmark-folder" data-bookmark-id="${item.id}" title="${safeTitle}">
-      <span class="bookmark-pill-icon" aria-hidden="true">+</span>
+    <button class="bookmark-pill folder${isExpanded ? ' expanded' : ''}" type="button" data-action="toggle-bookmark-folder" data-bookmark-id="${safeId}" title="${safeTitle}" style="--bookmark-depth:${depth}">
+      <span class="bookmark-folder-chevron" aria-hidden="true">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="m9 5 7 7-7 7" />
+        </svg>
+      </span>
       <span class="bookmark-pill-label">${safeTitle}</span>
       <span class="bookmark-pill-meta">${count}</span>
     </button>
+    ${childMarkup}
   `;
 }
 
@@ -1824,22 +1841,16 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
-  if (action === 'open-bookmark-folder') {
+  if (action === 'toggle-bookmark-folder') {
     const folderId = actionEl.dataset.bookmarkId;
-    if (!folderId || !chrome.bookmarks?.getSubTree) return;
+    if (!folderId) return;
 
-    try {
-      const nodes = await chrome.bookmarks.getSubTree(folderId);
-      const folder = nodes?.[0];
-      const firstLink = folder?.children?.find(child => !!child.url);
-      if (firstLink?.url) {
-        await openInCurrentTab(firstLink.url);
-        return;
-      }
-      await chrome.tabs.create({ url: 'chrome://bookmarks/' });
-    } catch (err) {
-      console.warn('[tab-out] Could not open bookmark folder:', err);
+    if (expandedBookmarkFolders.has(folderId)) {
+      expandedBookmarkFolders.delete(folderId);
+    } else {
+      expandedBookmarkFolders.add(folderId);
     }
+    await renderBookmarksStrip();
     return;
   }
 
