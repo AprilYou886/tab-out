@@ -196,4 +196,4 @@ MIT
 
 ---
 
-Built by [Zara](https://x.com/zarazhangrui)、[April](https://x.com/AprilYou886ƒ)
+Built by [Zara](https://x.com/zarazhangrui)、[April](https://x.com/AprilYou886)
