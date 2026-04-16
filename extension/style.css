@@ -501,6 +501,7 @@ header {
   z-index: 5;
   display: flex;
   flex-direction: column;
+  min-width: 188px;
 }
 
 .bookmarks-more {
@@ -613,6 +614,31 @@ header {
   font-size: 13px;
   color: var(--muted);
   font-style: italic;
+}
+
+.bookmarks-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  background: transparent;
+}
+
+.bookmarks-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 2px;
+  width: 1px;
+  height: 100%;
+  background: rgba(232, 226, 218, 0.95);
+}
+
+body.resizing-bookmarks {
+  cursor: col-resize;
+  user-select: none;
 }
 
 /* ---- Tab cleanup banner ---- */
@@ -1498,63 +1524,6 @@ footer { animation: fadeUp 0.5s ease 0.65s both; }
   }
 }
 
-@media (max-width: 1480px) {
-  .bookmarks-strip {
-    position: static;
-    width: auto;
-    height: auto;
-    max-height: none;
-    overflow: visible;
-    padding: 18px 20px;
-    border-right: 1px solid rgba(232, 226, 218, 0.95);
-  }
-  .bookmarks-strip-header {
-    flex-direction: row;
-    justify-content: space-between;
-    align-items: center;
-    gap: 16px;
-    min-height: 0;
-  }
-  .bookmarks-more {
-    width: auto;
-    height: auto;
-    border-radius: 999px;
-    background: var(--ink);
-    color: var(--paper);
-    padding: 10px 16px;
-  }
-  .bookmarks-more svg {
-    width: 0;
-    height: 0;
-  }
-  .bookmarks-list {
-    display: flex;
-    flex-wrap: wrap;
-    flex-direction: row;
-    max-height: none;
-    overflow: visible;
-    padding-right: 0;
-  }
-  .bookmark-pill {
-    width: auto;
-    max-width: 100%;
-    border-radius: 999px;
-    padding: 10px 14px;
-    padding-left: 10px;
-    background: linear-gradient(180deg, rgba(255,255,255,0.95), rgba(248,245,240,0.92));
-  }
-  .bookmark-pill:hover {
-    background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,245,240,0.96));
-  }
-  .bookmark-favicon,
-  .bookmark-pill-icon {
-    width: 24px;
-    height: 24px;
-  }
-  .bookmark-pill-label {
-    font-size: 13px;
-  }
-}
 
 /* ---- Checklist items ---- */
 .deferred-item {

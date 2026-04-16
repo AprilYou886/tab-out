@@ -32,6 +32,8 @@ let expandedBookmarkFolders = new Set();
 
 const SHORTCUTS_STORAGE_KEY = 'topShortcuts';
 const SHORTCUT_LIMIT = 10;
+const BOOKMARKS_SIDEBAR_WIDTH_KEY = 'bookmarksSidebarWidth';
+const BOOKMARKS_SIDEBAR_MIN_WIDTH = 188;
 
 /* ----------------------------------------------------------------
    SEARCH + BOOKMARKS BRIDGE
@@ -103,6 +105,15 @@ async function getShortcutPrefs() {
     customShortcuts: Array.isArray(stored.customShortcuts) ? stored.customShortcuts : [],
     hiddenTopSites: Array.isArray(stored.hiddenTopSites) ? stored.hiddenTopSites : [],
   };
+}
+
+async function getBookmarksSidebarWidth() {
+  const { [BOOKMARKS_SIDEBAR_WIDTH_KEY]: width } = await chrome.storage.local.get(BOOKMARKS_SIDEBAR_WIDTH_KEY);
+  return typeof width === 'number' ? width : null;
+}
+
+async function saveBookmarksSidebarWidth(width) {
+  await chrome.storage.local.set({ [BOOKMARKS_SIDEBAR_WIDTH_KEY]: width });
 }
 
 async function saveShortcutPrefs(next) {
@@ -196,6 +207,62 @@ function normalizeSiteKey(url) {
 
 function topSiteSourceId(url) {
   return `top:${normalizeSiteKey(url)}`;
+}
+
+function getBookmarksSidebarMaxWidth() {
+  const container = document.querySelector('.container');
+  const containerRect = container?.getBoundingClientRect();
+  const maxFromLayout = containerRect ? Math.floor(containerRect.left - 12) : 240;
+  return Math.max(BOOKMARKS_SIDEBAR_MIN_WIDTH, maxFromLayout);
+}
+
+function applyBookmarksSidebarWidth(width) {
+  const sidebar = document.querySelector('.bookmarks-strip');
+  if (!sidebar) return getBookmarksSidebarMaxWidth();
+
+  const maxWidth = getBookmarksSidebarMaxWidth();
+  const clamped = Math.max(BOOKMARKS_SIDEBAR_MIN_WIDTH, Math.min(Math.round(width || 0), maxWidth));
+  sidebar.style.width = `${clamped}px`;
+  return clamped;
+}
+
+async function initBookmarksSidebarResize() {
+  const handle = document.getElementById('bookmarksResizeHandle');
+  const sidebar = document.querySelector('.bookmarks-strip');
+  if (!handle || !sidebar) return;
+
+  const savedWidth = await getBookmarksSidebarWidth();
+  const initialWidth = applyBookmarksSidebarWidth(savedWidth || sidebar.getBoundingClientRect().width || 188);
+
+  let active = false;
+
+  const onPointerMove = (e) => {
+    if (!active) return;
+    applyBookmarksSidebarWidth(e.clientX);
+  };
+
+  const onPointerUp = async () => {
+    if (!active) return;
+    active = false;
+    document.body.classList.remove('resizing-bookmarks');
+    const width = applyBookmarksSidebarWidth(sidebar.getBoundingClientRect().width);
+    await saveBookmarksSidebarWidth(width);
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', onPointerUp);
+  };
+
+  handle.addEventListener('pointerdown', (e) => {
+    active = true;
+    document.body.classList.add('resizing-bookmarks');
+    handle.setPointerCapture?.(e.pointerId);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+  });
+
+  window.addEventListener('resize', async () => {
+    const width = applyBookmarksSidebarWidth(sidebar.getBoundingClientRect().width || initialWidth);
+    await saveBookmarksSidebarWidth(width);
+  });
 }
 
 function escapeHtml(value) {
@@ -2027,4 +2094,5 @@ if (chrome.topSites) {
 /* ----------------------------------------------------------------
    INITIALIZE
    ---------------------------------------------------------------- */
+initBookmarksSidebarResize();
 renderDashboard();
